@@ -27,6 +27,7 @@ Base.metadata.create_all(bind=engine)
 from typing import Optional
 
 class StudentCreateSchema(BaseModel):
+    id: Optional[int] = None  # Add this line
     name: Optional[str] = None
     age: Optional[int] = None
     school: Optional[str] = None
