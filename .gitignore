@@ -1,0 +1,24 @@
+# Python cache files
+*.pyc
+*.pyo
+__pycache__/
+*.log
+
+# Virtual environment
+venv/
+.env
+
+# IDE files (for PyCharm)
+.idea/
+*.iml
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# SQLite database (if used)
+*.db
+
+# FastAPI specific files
+test_reports/
+uvicorn.log
