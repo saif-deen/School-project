@@ -4,13 +4,17 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from pydantic import BaseModel
 import random
+from together import Together  # Correct import
+from typing import Optional
 
 app = FastAPI()
 
+# Database setup
 DATABASE_URL = "sqlite:///./students.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
 
 class Student(Base):
     __tablename__ = "students"
@@ -21,10 +25,64 @@ class Student(Base):
     study_year = Column(String)
     place_of_residence = Column(String)
 
+
 Base.metadata.create_all(bind=engine)
 
-# Request Schema
-from typing import Optional
+# Together AI instance setup
+together = Together(api_key="310df48cdca3e309bb656e62d05a97816142720d7578e402eb4ab17087aeaeaa")  # Replace with your real API key
+
+
+def fetch_student_data():
+    """Fetch all student records from the database."""
+    db = SessionLocal()
+    students = db.query(Student).all()
+    db.close()
+    if not students:
+        return "No student data available in the database."
+    return "\n".join(
+        [f"ID: {student.id}, Name: {student.name}, Age: {student.age}, School: {student.school}, "
+         f"Study Year: {student.study_year}, Residence: {student.place_of_residence}" for student in students]
+    )
+
+
+def ask_model_with_agent(question: str) -> str:
+    """Query Meta Llama model with database information and a question."""
+    # Step 1: Retrieve the database information
+    database_info = fetch_student_data()
+
+    # Step 2: Create an input prompt for the Meta Llama agent
+    prompt = f"""
+You are a data analysis assistant. Below is the student data from the database:
+
+{database_info}
+
+Answer the following user question based on the above data:
+{question}
+    """
+
+    # Step 3: Query the Meta Llama model
+    try:
+        response = together.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ask_agent/")
+def ask_agent(question: str):
+    """API endpoint to ask a question to the Meta Llama agent."""
+    try:
+        response = ask_model_with_agent(question)
+        return {"response": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+from typing import Optional  # Ensure this is included
 
 class StudentCreateSchema(BaseModel):
     id: Optional[int] = None  # Add this line
@@ -111,7 +169,7 @@ def seed_data_with_arabic_data():
     db.commit()
     db.close()
 
-#seed_data_with_arabic_data()
+seed_data_with_arabic_data()
 
 
 # CRUD Operations
