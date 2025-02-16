@@ -4,8 +4,11 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from pydantic import BaseModel
 import random
-from together import Together  # Correct import
-from typing import Optional
+from together import Together
+from langchain.agents import initialize_agent, AgentType
+from langchain.memory import ConversationBufferMemory
+from langchain.tools import Tool
+import os
 
 app = FastAPI()
 
@@ -28,57 +31,102 @@ class Student(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# Together AI instance setup
-together = Together(api_key="310df48cdca3e309bb656e62d05a97816142720d7578e402eb4ab17087aeaeaa")  # Replace with your real API key
+# Set Together AI API Key
+os.environ["TOGETHER_API_KEY"] = "310df48cdca3e309bb656e62d05a97816142720d7578e402eb4ab17087aeaeaa"  # Replace with your actual API key
+together = Together(api_key=os.getenv("TOGETHER_API_KEY"))
 
 
-def fetch_student_data():
-    """Fetch all student records from the database."""
+def fetch_student_data(student_id: str = None, name: str = None, school: str = None, study_year: str = None, place_of_residence: str = None):
+    """Fetch student records based on multiple filters."""
     db = SessionLocal()
-    students = db.query(Student).all()
+    query = db.query(Student)
+
+    if student_id:
+        query = query.filter(Student.id == int(student_id))
+    if name:
+        query = query.filter(Student.name.ilike(f"%{name}%"))
+    if school:
+        query = query.filter(Student.school.ilike(f"%{school}%"))
+    if study_year:
+        query = query.filter(Student.study_year.ilike(f"%{study_year}%"))
+    if place_of_residence:
+        query = query.filter(Student.place_of_residence.ilike(f"%{place_of_residence}%"))
+
+    students = query.all()
     db.close()
+
     if not students:
-        return "No student data available in the database."
-    return "\n".join(
-        [f"ID: {student.id}, Name: {student.name}, Age: {student.age}, School: {student.school}, "
-         f"Study Year: {student.study_year}, Residence: {student.place_of_residence}" for student in students]
-    )
+        return "No matching student found."
+
+    return "\n".join([
+        f"ID: {student.id}, Name: {student.name}, Age: {student.age}, "
+        f"School: {student.school}, Study Year: {student.study_year}, "
+        f"Residence: {student.place_of_residence}" for student in students
+    ])
 
 
-def ask_model_with_agent(question: str) -> str:
-    """Query Meta Llama model with database information and a question."""
-    # Step 1: Retrieve the database information
-    database_info = fetch_student_data()
-
-    # Step 2: Create an input prompt for the Meta Llama agent
-    prompt = f"""
-You are a data analysis assistant. Below is the student data from the database:
-
-{database_info}
-
-Answer the following user question based on the above data:
-{question}
-    """
-
-    # Step 3: Query the Meta Llama model
-    try:
-        response = together.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
+from langchain.tools import Tool
+
+# Define a tool to fetch student data
+get_student_data_tool = Tool(
+    name="get_student_data",
+    func=fetch_student_data,
+    description="Fetches student details by ID, Name, School, Study Year, or Place of Residence. "
+                "Provide one or more of these parameters to get student information."
+)
+
+
+from langchain.llms.base import LLM
+from typing import Optional
+
+class TogetherAILLM(LLM):
+    api_key: str = os.getenv("TOGETHER_API_KEY")
+
+    def _call(self, prompt: str, stop: Optional[list[str]] = None) -> str:
+        """Call the Together AI model and return the response."""
+        try:
+            response = together.chat.completions.create(
+                model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @property
+    def _llm_type(self) -> str:
+        return "TogetherAI"
+
+
+# ✅ Step 6: Initialize the Agent (Must be placed after all dependencies are defined)
+together_ai = TogetherAILLM()
+
+from langchain.agents import AgentExecutor  # ✅ Import AgentExecutor
+
+agent = initialize_agent(
+    tools=[get_student_data_tool],  # ✅ Ensure this is defined
+    llm=together_ai,
+    agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,  # ✅ Updated agent type
+    memory=ConversationBufferMemory(memory_key="chat_history"),
+    verbose=True,
+    handle_parsing_errors=True  # ✅ Added to fix parsing issues
+)
+
+
+
+# ✅ Step 7: Define API Endpoint for Agent
 @app.get("/ask_agent/")
 def ask_agent(question: str):
-    """API endpoint to ask a question to the Meta Llama agent."""
+    """API endpoint to ask a question to the AI agent."""
     try:
-        response = ask_model_with_agent(question)
+        response = agent.run(question)
         return {"response": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 
 
@@ -173,15 +221,25 @@ seed_data_with_arabic_data()
 
 
 # CRUD Operations
-@app.post("/students/", response_model=StudentResponseSchema)
-def create_student(student: StudentCreateSchema):
+from fastapi import Depends
+from sqlalchemy.orm import Session
+
+# Dependency to get the DB session
+def get_db():
     db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+@app.post("/students/", response_model=StudentResponseSchema)
+def create_student(student: StudentCreateSchema, db: Session = Depends(get_db)):
     db_student = Student(**student.dict())
     db.add(db_student)
     db.commit()
     db.refresh(db_student)
-    db.close()
     return db_student
+
 
 
 
@@ -257,13 +315,16 @@ def delete_student(student_id: int):
     return {"detail": f"Student with ID {student_id} deleted successfully"}
 
 
-@app.get("/students/search/", response_model=list[StudentResponseSchema])  # Use StudentResponseSchema here
+from typing import Optional
+
+
+@app.get("/students/search/", response_model=list[StudentResponseSchema])
 def search_students(
-    name: str = None,
-    age: int = None,
-    school: str = None,
-    study_year: str = None,
-    place_of_residence: str = None
+        name: Optional[str] = None,
+        age: Optional[int] = None,
+        school: Optional[str] = None,
+        study_year: Optional[str] = None,
+        place_of_residence: Optional[str] = None
 ):
     db = SessionLocal()
     query = db.query(Student)
@@ -281,7 +342,9 @@ def search_students(
 
     results = query.all()
     db.close()
+
     if not results:
         raise HTTPException(status_code=404, detail="No matching students found")
-    return results  # No need to add a comma here
+
+    return results
 
