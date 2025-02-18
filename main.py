@@ -1,24 +1,27 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from sqlalchemy import Column, Integer, String, create_engine
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
+from typing import Optional
 import random
-from together import Together
-from langchain.agents import initialize_agent, AgentType
-from langchain.memory import ConversationBufferMemory
-from langchain.tools import Tool
 import os
+from langchain.agents import create_sql_agent
+from langchain.sql_database import SQLDatabase
+from langchain.llms.base import LLM
+from langchain.agents.agent_types import AgentType
+from together import Together
 
+# ✅ Initialize FastAPI
 app = FastAPI()
 
-# Database setup
+# ✅ Database setup (SQLite)
 DATABASE_URL = "sqlite:///./students.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-
+# ✅ Define Student Model
 class Student(Base):
     __tablename__ = "students"
     id = Column(Integer, primary_key=True, index=True)
@@ -28,112 +31,13 @@ class Student(Base):
     study_year = Column(String)
     place_of_residence = Column(String)
 
-
 Base.metadata.create_all(bind=engine)
 
-# Set Together AI API Key
-os.environ["TOGETHER_API_KEY"] = "310df48cdca3e309bb656e62d05a97816142720d7578e402eb4ab17087aeaeaa"  # Replace with your actual API key
-together = Together(api_key=os.getenv("TOGETHER_API_KEY"))
-
-
-def fetch_student_data(student_id: str = None, name: str = None, school: str = None, study_year: str = None, place_of_residence: str = None):
-    """Fetch student records based on multiple filters."""
-    db = SessionLocal()
-    query = db.query(Student)
-
-    if student_id:
-        query = query.filter(Student.id == int(student_id))
-    if name:
-        query = query.filter(Student.name.ilike(f"%{name}%"))
-    if school:
-        query = query.filter(Student.school.ilike(f"%{school}%"))
-    if study_year:
-        query = query.filter(Student.study_year.ilike(f"%{study_year}%"))
-    if place_of_residence:
-        query = query.filter(Student.place_of_residence.ilike(f"%{place_of_residence}%"))
-
-    students = query.all()
-    db.close()
-
-    if not students:
-        return "No matching student found."
-
-    return "\n".join([
-        f"ID: {student.id}, Name: {student.name}, Age: {student.age}, "
-        f"School: {student.school}, Study Year: {student.study_year}, "
-        f"Residence: {student.place_of_residence}" for student in students
-    ])
 
 
 
-
-from langchain.tools import Tool
-
-# Define a tool to fetch student data
-get_student_data_tool = Tool(
-    name="get_student_data",
-    func=fetch_student_data,
-    description="Fetches student details by ID, Name, School, Study Year, or Place of Residence. "
-                "Provide one or more of these parameters to get student information."
-)
-
-
-from langchain.llms.base import LLM
-from typing import Optional
-
-class TogetherAILLM(LLM):
-    api_key: str = os.getenv("TOGETHER_API_KEY")
-
-    def _call(self, prompt: str, stop: Optional[list[str]] = None) -> str:
-        """Call the Together AI model and return the response."""
-        try:
-            response = together.chat.completions.create(
-                model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @property
-    def _llm_type(self) -> str:
-        return "TogetherAI"
-
-
-# ✅ Step 6: Initialize the Agent (Must be placed after all dependencies are defined)
-together_ai = TogetherAILLM()
-
-from langchain.agents import AgentExecutor  # ✅ Import AgentExecutor
-
-agent = initialize_agent(
-    tools=[get_student_data_tool],  # ✅ Ensure this is defined
-    llm=together_ai,
-    agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,  # ✅ Updated agent type
-    memory=ConversationBufferMemory(memory_key="chat_history"),
-    verbose=True,
-    handle_parsing_errors=True  # ✅ Added to fix parsing issues
-)
-
-
-
-# ✅ Step 7: Define API Endpoint for Agent
-@app.get("/ask_agent/")
-def ask_agent(question: str):
-    """API endpoint to ask a question to the AI agent."""
-    try:
-        response = agent.run(question)
-        return {"response": response}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-
-
-
-from typing import Optional  # Ensure this is included
-
+# ✅ Pydantic Schemas
 class StudentCreateSchema(BaseModel):
-    id: Optional[int] = None  # Add this line
     name: Optional[str] = None
     age: Optional[int] = None
     school: Optional[str] = None
@@ -143,24 +47,28 @@ class StudentCreateSchema(BaseModel):
     class Config:
         orm_mode = True
 
-
-
-
-# Response Schema
 class StudentResponseSchema(StudentCreateSchema):
-    id: int  # id is automatically generated
+    id: int
 
-    class Config:
-        orm_mode = True
+# ✅ Dependency for database session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-
+@app.get("/test_db/")
+def test_db(db: Session = Depends(get_db)):
+    students = db.query(Student).limit(5).all()
+    if not students:
+        return {"message": "No students found in the database!"}
+    return students
 
 
 # Helper function to seed database with Arabic data
 def seed_data_with_arabic_data():
     db = SessionLocal()
-
-    # Clear existing data
     db.query(Student).delete()
     db.commit()
 
@@ -220,18 +128,6 @@ def seed_data_with_arabic_data():
 seed_data_with_arabic_data()
 
 
-# CRUD Operations
-from fastapi import Depends
-from sqlalchemy.orm import Session
-
-# Dependency to get the DB session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 @app.post("/students/", response_model=StudentResponseSchema)
 def create_student(student: StudentCreateSchema, db: Session = Depends(get_db)):
     db_student = Student(**student.dict())
@@ -240,111 +136,76 @@ def create_student(student: StudentCreateSchema, db: Session = Depends(get_db)):
     db.refresh(db_student)
     return db_student
 
-
-
-
 @app.get("/students/{student_id}", response_model=StudentResponseSchema)
-def get_student(student_id: int):
-    db = SessionLocal()
+def get_student(student_id: int, db: Session = Depends(get_db)):
     student = db.query(Student).filter(Student.id == student_id).first()
-    db.close()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     return student
-
-
 
 @app.get("/students/", response_model=list[StudentResponseSchema])
-def list_students():
-    db = SessionLocal()
-    students = db.query(Student).all()
-    db.close()
-    return students
-
-
-
-
-
-
-
-@app.put("/students/{student_id}", response_model=StudentResponseSchema)
-def update_student(student_id: int, student_data: StudentCreateSchema):
-    db = SessionLocal()
-    student = db.query(Student).filter(Student.id == student_id).first()
-
-    if not student:
-        db.close()
-        raise HTTPException(status_code=404, detail="Student not found")
-
-    # Only update fields that are not None
-    if student_data.name is not None:
-        student.name = student_data.name
-    if student_data.age is not None:
-        student.age = student_data.age
-    if student_data.school is not None:
-        student.school = student_data.school
-    if student_data.study_year is not None:
-        student.study_year = student_data.study_year
-    if student_data.place_of_residence is not None:
-        student.place_of_residence = student_data.place_of_residence
-
-    # Commit the changes to the database
-    db.commit()
-    db.refresh(student)
-    db.close()
-
-    return student
-
-
-
-
-
+def list_students(db: Session = Depends(get_db)):
+    return db.query(Student).all()
 
 @app.delete("/students/{student_id}")
-def delete_student(student_id: int):
-    db = SessionLocal()
+def delete_student(student_id: int, db: Session = Depends(get_db)):
     student = db.query(Student).filter(Student.id == student_id).first()
-
     if not student:
-        db.close()
         raise HTTPException(status_code=404, detail="Student not found")
-
     db.delete(student)
     db.commit()
-    db.close()
-    return {"detail": f"Student with ID {student_id} deleted successfully"}
+    return {"detail": f"Student {student_id} deleted"}
+
+# ✅ AI Agent Setup
+os.environ["TOGETHER_API_KEY"] = "your-api-key-here"
+
+class TogetherAILLM(LLM):
+    api_key: str = "e9f8ac00b929c64eeac0effb5fc43db45857936203e2ce172ede3fad753806c8"  # Directly set the key
+
+    def _call(self, prompt: str, **kwargs) -> str:
+        try:
+            response = Together(api_key=self.api_key).chat.completions.create(
+                model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 
-from typing import Optional
+    @property
+    def _llm_type(self) -> str:
+        return "TogetherAI"
+
+# ✅ Initialize SQL LangChain Agent
+together_ai = TogetherAILLM()
+sql_database = SQLDatabase(engine)
+
+# Initialize SQL LangChain Agent
+# ✅ Initialize SQL LangChain Agent with better output handling
+sql_agent = create_sql_agent(
+    llm=together_ai,
+    db=sql_database,
+    agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True,
+    handle_parsing_errors=True,  # Allow retrying on parsing errors
+    max_iterations=15,
+    max_execution_time=60,
+    output_parser_type="action_only",  # Focus on actions for database querying, not mixing final answers
+)
 
 
-@app.get("/students/search/", response_model=list[StudentResponseSchema])
-def search_students(
-        name: Optional[str] = None,
-        age: Optional[int] = None,
-        school: Optional[str] = None,
-        study_year: Optional[str] = None,
-        place_of_residence: Optional[str] = None
-):
-    db = SessionLocal()
-    query = db.query(Student)
+# ✅ AI Query Endpoint
+@app.get("/ask_agent/")
+def ask_agent(question: str):
+    try:
+        if not question:
+            raise HTTPException(status_code=400, detail="Question cannot be empty")
 
-    if name:
-        query = query.filter(Student.name == name)
-    if age:
-        query = query.filter(Student.age == age)
-    if school:
-        query = query.filter(Student.school == school)
-    if study_year:
-        query = query.filter(Student.study_year == study_year)
-    if place_of_residence:
-        query = query.filter(Student.place_of_residence == place_of_residence)
+        response = sql_agent.run(question)
+        return {"response": response}
 
-    results = query.all()
-    db.close()
+    except Exception as e:
+        return {"error": str(e)}
 
-    if not results:
-        raise HTTPException(status_code=404, detail="No matching students found")
-
-    return results
 
