@@ -1,27 +1,42 @@
+import os
+import random
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends
 from sqlalchemy import Column, Integer, String, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 from typing import Optional
-import random
-import os
 from langchain.agents import create_sql_agent
 from langchain.sql_database import SQLDatabase
 from langchain.llms.base import LLM
 from langchain.agents.agent_types import AgentType
 from together import Together
 
-# ✅ Initialize FastAPI
+# Load environment variables
+load_dotenv()
+TOGETHER_API_KEY = os.getenv("ac16a0ce22882628237c7583f5e3c283f4d8f85f25a67eae83bd1e650d7c440d")
+if not TOGETHER_API_KEY:
+    raise ValueError("Missing TOGETHER_API_KEY environment variable")
+
+# Initialize FastAPI
 app = FastAPI()
 
-# ✅ Database setup (SQLite)
+# Database setup (SQLite with connection pool)
 DATABASE_URL = "sqlite:///./students.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800  # Recycle connections every 30 minutes
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# ✅ Define Student Model
+
+# Define Student Model
 class Student(Base):
     __tablename__ = "students"
     id = Column(Integer, primary_key=True, index=True)
@@ -31,12 +46,11 @@ class Student(Base):
     study_year = Column(String)
     place_of_residence = Column(String)
 
+
 Base.metadata.create_all(bind=engine)
 
 
-
-
-# ✅ Pydantic Schemas
+# Pydantic Schemas
 class StudentCreateSchema(BaseModel):
     name: Optional[str] = None
     age: Optional[int] = None
@@ -47,23 +61,18 @@ class StudentCreateSchema(BaseModel):
     class Config:
         orm_mode = True
 
+
 class StudentResponseSchema(StudentCreateSchema):
     id: int
 
-# ✅ Dependency for database session
+
+# Dependency for database session
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-
-@app.get("/test_db/")
-def test_db(db: Session = Depends(get_db)):
-    students = db.query(Student).limit(5).all()
-    if not students:
-        return {"message": "No students found in the database!"}
-    return students
 
 
 # Helper function to seed database with Arabic data
@@ -128,6 +137,7 @@ def seed_data_with_arabic_data():
 seed_data_with_arabic_data()
 
 
+# Student CRUD Endpoints
 @app.post("/students/", response_model=StudentResponseSchema)
 def create_student(student: StudentCreateSchema, db: Session = Depends(get_db)):
     db_student = Student(**student.dict())
@@ -136,6 +146,7 @@ def create_student(student: StudentCreateSchema, db: Session = Depends(get_db)):
     db.refresh(db_student)
     return db_student
 
+
 @app.get("/students/{student_id}", response_model=StudentResponseSchema)
 def get_student(student_id: int, db: Session = Depends(get_db)):
     student = db.query(Student).filter(Student.id == student_id).first()
@@ -143,9 +154,11 @@ def get_student(student_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Student not found")
     return student
 
+
 @app.get("/students/", response_model=list[StudentResponseSchema])
 def list_students(db: Session = Depends(get_db)):
     return db.query(Student).all()
+
 
 @app.delete("/students/{student_id}")
 def delete_student(student_id: int, db: Session = Depends(get_db)):
@@ -156,11 +169,12 @@ def delete_student(student_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"detail": f"Student {student_id} deleted"}
 
-# ✅ AI Agent Setup
-os.environ["TOGETHER_API_KEY"] = "your-api-key-here"
 
+# AI Agent Setup
 class TogetherAILLM(LLM):
-    api_key: str = "e9f8ac00b929c64eeac0effb5fc43db45857936203e2ce172ede3fad753806c8"  # Directly set the key
+    def __init__(self, api_key: str = None):
+        super().__init__()
+        self.api_key = api_key or TOGETHER_API_KEY
 
     def _call(self, prompt: str, **kwargs) -> str:
         try:
@@ -170,42 +184,66 @@ class TogetherAILLM(LLM):
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
+            error_msg = f"TogetherAI API error: {str(e)}"
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
 
     @property
     def _llm_type(self) -> str:
         return "TogetherAI"
 
-# ✅ Initialize SQL LangChain Agent
+
+# Initialize LangChain SQL Agent
 together_ai = TogetherAILLM()
 sql_database = SQLDatabase(engine)
-
-# Initialize SQL LangChain Agent
-# ✅ Initialize SQL LangChain Agent with better output handling
 sql_agent = create_sql_agent(
     llm=together_ai,
     db=sql_database,
     agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
     verbose=True,
-    handle_parsing_errors=True,  # Allow retrying on parsing errors
-    max_iterations=15,
-    max_execution_time=60,
-    output_parser_type="action_only",  # Focus on actions for database querying, not mixing final answers
+    handle_parsing_errors=True,
+    max_iterations=10,
+    max_execution_time=30,
+    output_parser_type="action_only",
+    agent_executor_kwargs={
+        "return_intermediate_steps": True,
+        "early_stopping_method": "generate",
+    }
 )
 
 
-# ✅ AI Query Endpoint
+# AI Query Endpoint
 @app.get("/ask_agent/")
 def ask_agent(question: str):
     try:
         if not question:
             raise HTTPException(status_code=400, detail="Question cannot be empty")
 
-        response = sql_agent.run(question)
-        return {"response": response}
+        enhanced_question = f"""
+        Please answer the following question about the student database:
+        {question}
+        Available tables: students
+        Student fields: id, name, age, school, study_year, place_of_residence
+        Note: Many records contain Arabic text.
+        """
 
+        response = sql_agent.run(enhanced_question)
+        return {"response": response, "status": "success"}
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Agent error: {error_details}")
+        return {"error": str(e), "status": "error"}
+
+
+# Health Check Endpoint
+@app.get("/health")
+def health_check():
+    try:
+        with SessionLocal() as db:
+            db.execute("SELECT 1")
+        return {"status": "healthy", "database": "connected"}
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
 
 
