@@ -1,6 +1,4 @@
-import os
 import random
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends
 from sqlalchemy import Column, Integer, String, create_engine
 from sqlalchemy.ext.declarative import declarative_base
@@ -13,11 +11,7 @@ from langchain.llms.base import LLM
 from langchain.agents.agent_types import AgentType
 from together import Together
 
-# Load environment variables
-load_dotenv()
-TOGETHER_API_KEY = os.getenv("ac16a0ce22882628237c7583f5e3c283f4d8f85f25a67eae83bd1e650d7c440d")
-if not TOGETHER_API_KEY:
-    raise ValueError("Missing TOGETHER_API_KEY environment variable")
+
 
 # Initialize FastAPI
 app = FastAPI()
@@ -174,7 +168,7 @@ def delete_student(student_id: int, db: Session = Depends(get_db)):
 class TogetherAILLM(LLM):
     def __init__(self, api_key: str = None):
         super().__init__()
-        self.api_key = api_key or TOGETHER_API_KEY
+        self.api_key = api_key or TOGETHER_API_KEY  # Ensure TOGETHER_API_KEY is loaded
 
     def _call(self, prompt: str, **kwargs) -> str:
         try:
@@ -184,13 +178,12 @@ class TogetherAILLM(LLM):
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            error_msg = f"TogetherAI API error: {str(e)}"
-            print(error_msg)
-            raise HTTPException(status_code=500, detail=error_msg)
+            raise HTTPException(status_code=500, detail=f"TogetherAI API error: {str(e)}")
 
     @property
     def _llm_type(self) -> str:
         return "TogetherAI"
+
 
 
 # Initialize LangChain SQL Agent
