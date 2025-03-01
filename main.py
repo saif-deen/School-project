@@ -5,6 +5,8 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 from typing import Optional
+import os
+from dotenv import load_dotenv
 from langchain.agents import create_sql_agent
 from langchain.sql_database import SQLDatabase
 from langchain.llms.base import LLM
@@ -42,6 +44,20 @@ class Student(Base):
 
 
 Base.metadata.create_all(bind=engine)
+
+
+# Load environment variables from .env file
+load_dotenv()
+
+from pathlib import Path
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
+# Raise an error if the key is missing
+if not TOGETHER_API_KEY:
+    raise ValueError("Missing TOGETHER_API_KEY environment variable")
+
+print("API Key Loaded Successfully!")  # Debugging message
 
 
 # Pydantic Schemas
